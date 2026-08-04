@@ -18,6 +18,9 @@ let package = Package(
             dependencies: [
                 .product(name: "KeyboardShortcuts", package: "KeyboardShortcuts")
             ]
+        ),
+        .testTarget(
+            name: "ChuanTests"
         )
     ]
 )
