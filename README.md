@@ -51,13 +51,6 @@ codesign --verify --deep --strict --verbose=2 Chuan.app
 test "$(lipo -archs Chuan.app/Contents/MacOS/chuan)" = "arm64"
 ```
 
-## Notes
-
-Switching is performed with the system Text Input Source API
-(`TISSelectInputSource`). Some complex (CJKV) input methods have a
-long-standing platform quirk where programmatic selection is unreliable; this
-is a macOS limitation, not specific to this app.
-
 ## License
 
 MIT

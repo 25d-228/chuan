@@ -2,8 +2,7 @@ import AppKit
 import Carbon
 import KeyboardShortcuts
 
-/// A selectable keyboard input source, with its display metadata and the
-/// action to make it the active source.
+/// A selectable keyboard input source with its display metadata.
 final class InputSource: Equatable {
     let source: TISInputSource
     let id: String
@@ -21,10 +20,6 @@ final class InputSource: Equatable {
     /// A stable, per-source key for storing and registering its shortcut.
     var shortcutName: KeyboardShortcuts.Name {
         KeyboardShortcuts.Name("inputsource_" + id)
-    }
-
-    func select() {
-        TISSelectInputSource(source)
     }
 
     static func == (lhs: InputSource, rhs: InputSource) -> Bool {

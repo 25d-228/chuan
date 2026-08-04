@@ -20,6 +20,10 @@ extension TISInputSource {
         propertyValue(kTISPropertyInputSourceCategory) as? String
     }
 
+    var inputSourceType: String? {
+        propertyValue(kTISPropertyInputSourceType) as? String
+    }
+
     var isSelectable: Bool {
         (propertyValue(kTISPropertyInputSourceIsSelectCapable) as? Bool) ?? false
     }
