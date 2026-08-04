@@ -20,7 +20,13 @@ final class ShortcutRegistry {
         for source in InputSource.all where !registered.contains(source.id) {
             registered.insert(source.id)
             KeyboardShortcuts.onKeyUp(for: source.shortcutName) {
-                source.select()
+                Task { @MainActor in
+                    do {
+                        try await InputSourceSelector.shared.select(source)
+                    } catch {
+                        NSLog("Input-source shortcut failed: %@", error.localizedDescription)
+                    }
+                }
             }
         }
     }
