@@ -4,8 +4,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusBar: StatusBarController?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        NSApp.mainMenu = MainMenu.make()
-
         statusBar = StatusBarController { [weak self] in
             self?.showPreferences()
         }

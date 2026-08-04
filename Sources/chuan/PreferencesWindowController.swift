@@ -1,11 +1,7 @@
 import AppKit
 
 /// A single, reusable preferences window.
-///
-/// While the window is open the app becomes a regular app (Dock icon, visible
-/// menu bar, manageable by tiling window managers); when it closes the app
-/// returns to being a menu-bar-only accessory.
-final class PreferencesWindowController: NSWindowController, NSWindowDelegate {
+final class PreferencesWindowController: NSWindowController {
     static let shared = PreferencesWindowController()
 
     private init() {
@@ -22,7 +18,6 @@ final class PreferencesWindowController: NSWindowController, NSWindowDelegate {
         window.contentViewController = PreferencesViewController()
         window.center()
         super.init(window: window)
-        window.delegate = self
     }
 
     @available(*, unavailable)
@@ -31,17 +26,14 @@ final class PreferencesWindowController: NSWindowController, NSWindowDelegate {
     }
 
     func showAndActivate() {
-        NSApp.setActivationPolicy(.regular)
         showWindow(nil)
         window?.makeKeyAndOrderFront(nil)
+        // Accessory apps may not win activation, so order the window independently.
+        window?.orderFrontRegardless()
         if #available(macOS 14, *) {
             NSApp.activate()
         } else {
             NSApp.activate(ignoringOtherApps: true)
         }
-    }
-
-    func windowWillClose(_ notification: Notification) {
-        NSApp.setActivationPolicy(.accessory)
     }
 }
