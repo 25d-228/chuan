@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    name: Tests
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v6
+      - name: Run tests
+        run: ./scripts/test.sh
+
+  lint:
+    name: Lint
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v6
+      - name: Treat Swift warnings as errors
+        run: swift build -c release -Xswiftc -warnings-as-errors
+      - name: Check shell syntax
+        run: |
+          bash -n build.sh
+          bash -n scripts/make_icon.sh
+          bash -n scripts/test.sh
+      - name: Validate Info.plist
+        run: plutil -lint Info.plist
+
+  build:
+    name: Build
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v6
+      - name: Build release executable
+        run: swift build -c release
+      - name: Assemble application bundle
+        run: ./build.sh
+      - name: Verify application signature
+        run: codesign --verify --deep --strict --verbose=2 Chuan.app
+      - name: Verify executable architecture
+        run: test "$(lipo -archs Chuan.app/Contents/MacOS/chuan)" = "arm64"
