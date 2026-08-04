@@ -28,6 +28,8 @@ final class PreferencesWindowController: NSWindowController {
     func showAndActivate() {
         showWindow(nil)
         window?.makeKeyAndOrderFront(nil)
+        // Accessory apps may not win activation, so order the window independently.
+        window?.orderFrontRegardless()
         if #available(macOS 14, *) {
             NSApp.activate()
         } else {
