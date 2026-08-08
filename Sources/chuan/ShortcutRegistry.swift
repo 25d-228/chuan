@@ -21,11 +21,10 @@ final class ShortcutRegistry {
             registered.insert(source.id)
             KeyboardShortcuts.onKeyUp(for: source.shortcutName) {
                 Task { @MainActor in
-                    do {
-                        try await InputSourceSelector.shared.select(source)
-                    } catch {
-                        NSLog("Input-source shortcut failed: %@", error.localizedDescription)
-                    }
+                    guard InputSourceSelector.shared.shouldHandleShortcut(
+                        named: source.shortcutName
+                    ) else { return }
+                    InputSourceSelector.shared.request(source)
                 }
             }
         }
