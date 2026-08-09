@@ -2,9 +2,8 @@ import AppKit
 import Carbon
 import CoreGraphics
 import Foundation
-import OSLog
 
-struct DispatchInputSource: Equatable {
+struct SwitchableInputSource: Equatable {
     let id: String
     let isKeyboardLayout: Bool
     fileprivate let tisInputSource: TISInputSource?
@@ -28,181 +27,61 @@ struct DispatchInputSource: Equatable {
         self.tisInputSource = tisInputSource
     }
 
-    static func == (lhs: DispatchInputSource, rhs: DispatchInputSource) -> Bool {
+    static func == (lhs: SwitchableInputSource, rhs: SwitchableInputSource) -> Bool {
         lhs.id == rhs.id && lhs.isKeyboardLayout == rhs.isKeyboardLayout
     }
 }
 
-struct ShortcutSignature: Equatable, Hashable {
-    let keyCode: Int
-    let carbonModifiers: Int
-}
-
-struct NativePreviousInputSourceShortcut: Equatable {
+struct PreviousInputSourceShortcut: Equatable {
     let keyCode: CGKeyCode
-    let eventFlags: CGEventFlags
-    let signature: ShortcutSignature
+    let flags: CGEventFlags
 }
 
-enum SymbolicHotKeyError: LocalizedError, Equatable {
-    case missing
-    case disabled
-    case malformed
-
-    var errorDescription: String? {
-        switch self {
-        case .missing:
-            return "The macOS Select the previous input source shortcut is unavailable."
-        case .disabled:
-            return "Enable Select the previous input source in System Settings > Keyboard > Keyboard Shortcuts > Input Sources."
-        case .malformed:
-            return "The macOS Select the previous input source shortcut has an unsupported configuration."
-        }
-    }
-}
-
-enum SymbolicHotKeyParser {
-    private static let previousInputSourceEntryID = "60"
-    private static let keyCodeParameterIndex = 1
-    private static let modifierParameterIndex = 2
-
-    static func previousInputSourceShortcut(
-        from domain: [String: Any]
-    ) throws -> NativePreviousInputSourceShortcut {
-        guard let entries = domain["AppleSymbolicHotKeys"] as? [String: Any],
-              let entry = entries[previousInputSourceEntryID] as? [String: Any] else {
-            throw SymbolicHotKeyError.missing
-        }
-        guard let enabled = entry["enabled"] as? NSNumber else {
-            throw SymbolicHotKeyError.malformed
-        }
-        guard enabled.boolValue else {
-            throw SymbolicHotKeyError.disabled
-        }
-        guard let value = entry["value"] as? [String: Any],
-              let parameters = value["parameters"] as? [Any],
-              parameters.indices.contains(modifierParameterIndex),
-              let keyCodeNumber = parameters[keyCodeParameterIndex] as? NSNumber,
-              let modifierNumber = parameters[modifierParameterIndex] as? NSNumber,
-              keyCodeNumber.intValue >= 0,
-              keyCodeNumber.intValue <= Int(UInt16.max) else {
-            throw SymbolicHotKeyError.malformed
-        }
-
-        let eventFlags = CGEventFlags(rawValue: modifierNumber.uint64Value)
-        return NativePreviousInputSourceShortcut(
-            keyCode: CGKeyCode(keyCodeNumber.intValue),
-            eventFlags: eventFlags,
-            signature: ShortcutSignature(
-                keyCode: keyCodeNumber.intValue,
-                carbonModifiers: carbonModifiers(from: eventFlags)
-            )
-        )
-    }
-
-    private static func carbonModifiers(from flags: CGEventFlags) -> Int {
-        var modifiers = 0
-        if flags.contains(.maskCommand) {
-            modifiers |= cmdKey
-        }
-        if flags.contains(.maskControl) {
-            modifiers |= controlKey
-        }
-        if flags.contains(.maskAlternate) {
-            modifiers |= optionKey
-        }
-        if flags.contains(.maskShift) {
-            modifiers |= shiftKey
-        }
-        return modifiers
-    }
-}
-
-enum PostEventPermissionState: String, Equatable {
-    case preflightGranted
-    case requestGranted
-    case denied
-
-    var isGranted: Bool {
-        self != .denied
-    }
-}
-
-struct PostEventAccessController {
-    private var hasRequestedAccess = false
-
-    mutating func ensureAccess(
-        preflight: () -> Bool,
-        request: () -> Bool
-    ) -> PostEventPermissionState {
-        if preflight() {
-            return .preflightGranted
-        }
-        guard !hasRequestedAccess else { return .denied }
-        hasRequestedAccess = true
-        return request() ? .requestGranted : .denied
-    }
-}
-
-enum InputSourceDispatchError: LocalizedError, Equatable {
-    case targetUnavailable(String)
-    case noBridge
-    case symbolicHotKey(SymbolicHotKeyError)
+enum InputSourceSwitchError: LocalizedError, Equatable {
+    case sourceUnavailable(String)
+    case asciiBridgeUnavailable
+    case previousSourceShortcutUnavailable
     case postEventPermissionDenied
     case selectionFailed(phase: String, sourceID: String, status: OSStatus)
     case nativeEventCreationFailed
 
     var errorDescription: String? {
         switch self {
-        case let .targetUnavailable(sourceID):
-            return "Input source \(sourceID) is not prepared. Refresh input sources and try again."
-        case .noBridge:
-            return "No enabled ASCII keyboard layout is available for complex input-method switching."
-        case let .symbolicHotKey(error):
-            return error.localizedDescription
+        case let .sourceUnavailable(sourceID):
+            return "Input source \(sourceID) is unavailable. Refresh input sources and try again."
+        case .asciiBridgeUnavailable:
+            return "Enable an ASCII keyboard layout before switching to a complex input method."
+        case .previousSourceShortcutUnavailable:
+            return "Enable Select the previous input source in System Settings > Keyboard > Keyboard Shortcuts > Input Sources."
         case .postEventPermissionDenied:
-            return "Chuan needs permission to use the macOS input-source shortcut. Open System Settings > Privacy & Security > Accessibility, enable Chuan, then quit and reopen Chuan."
+            return "Enable Chuan in System Settings > Privacy & Security > Accessibility, then quit and reopen Chuan."
         case let .selectionFailed(phase, sourceID, status):
-            return "Could not select input source \(sourceID) during \(phase) (TIS status \(status))."
+            return "Could not select \(sourceID) during \(phase) (TIS status \(status))."
         case .nativeEventCreationFailed:
-            return "Chuan could not create the macOS previous-input-source events."
+            return "Chuan could not post the macOS previous-input-source shortcut."
         }
     }
 }
 
-enum NativeKeyEventPhase {
-    case keyDown
-    case keyUp
+@MainActor
+protocol InputSourceSwitchingSystem: AnyObject {
+    func asciiCapableKeyboardLayouts() -> [SwitchableInputSource]
+    func previousInputSourceShortcut() throws -> PreviousInputSourceShortcut
+    func ensurePostEventAccess() -> Bool
+    func select(_ inputSource: SwitchableInputSource) -> OSStatus
+    func postPreviousInputSourceShortcut(_ shortcut: PreviousInputSourceShortcut) -> Bool
 }
 
 @MainActor
-protocol InputSourceDispatchSystem: AnyObject {
-    var currentSourceID: String? { get }
+final class LiveInputSourceSwitchingSystem: InputSourceSwitchingSystem {
+    private static let previousInputSourceShortcutID = "60"
+    private static let keyCodeParameterIndex = 1
+    private static let modifierParameterIndex = 2
 
-    func asciiCapableKeyboardLayouts() -> [DispatchInputSource]
-    func previousInputSourceShortcut() throws -> NativePreviousInputSourceShortcut
-    func ensurePostEventAccess() -> PostEventPermissionState
-    func select(_ inputSource: DispatchInputSource) -> OSStatus
-    func postPreviousInputSourceShortcut(
-        _ shortcut: NativePreviousInputSourceShortcut,
-        eventSourceState: CGEventSourceStateID,
-        marker: Int64,
-        didPost: (NativeKeyEventPhase) -> Void
-    ) throws
-}
+    private var didRequestPostEventAccess = false
 
-@MainActor
-final class LiveInputSourceDispatchSystem: InputSourceDispatchSystem {
-    private var postEventAccess = PostEventAccessController()
-
-    var currentSourceID: String? {
-        TISCopyCurrentKeyboardInputSource()?.takeRetainedValue().identifier
-    }
-
-    func asciiCapableKeyboardLayouts() -> [DispatchInputSource] {
-        guard let list = TISCreateASCIICapableInputSourceList() else {
-            return []
-        }
+    func asciiCapableKeyboardLayouts() -> [SwitchableInputSource] {
+        guard let list = TISCreateASCIICapableInputSourceList() else { return [] }
         let sources = (list.takeRetainedValue() as NSArray) as? [TISInputSource] ?? []
         return sources
             .filter {
@@ -211,38 +90,50 @@ final class LiveInputSourceDispatchSystem: InputSourceDispatchSystem {
                     && $0.isSelectable
                     && $0.isASCIICapable
             }
-            .compactMap(DispatchInputSource.init)
+            .compactMap(SwitchableInputSource.init)
             .sorted { $0.id < $1.id }
     }
 
-    func previousInputSourceShortcut() throws -> NativePreviousInputSourceShortcut {
+    func previousInputSourceShortcut() throws -> PreviousInputSourceShortcut {
         let domain = UserDefaults.standard.persistentDomain(
             forName: "com.apple.symbolichotkeys"
         ) ?? [:]
-        return try SymbolicHotKeyParser.previousInputSourceShortcut(from: domain)
-    }
-
-    func ensurePostEventAccess() -> PostEventPermissionState {
-        postEventAccess.ensureAccess(
-            preflight: { CGPreflightPostEventAccess() },
-            request: { CGRequestPostEventAccess() }
+        guard let entries = domain["AppleSymbolicHotKeys"] as? [String: Any],
+              let entry = entries[Self.previousInputSourceShortcutID] as? [String: Any],
+              (entry["enabled"] as? NSNumber)?.boolValue == true,
+              let value = entry["value"] as? [String: Any],
+              let parameters = value["parameters"] as? [Any],
+              parameters.indices.contains(Self.modifierParameterIndex),
+              let keyCode = parameters[Self.keyCodeParameterIndex] as? NSNumber,
+              let modifiers = parameters[Self.modifierParameterIndex] as? NSNumber,
+              keyCode.intValue >= 0,
+              keyCode.intValue <= Int(UInt16.max) else {
+            throw InputSourceSwitchError.previousSourceShortcutUnavailable
+        }
+        return PreviousInputSourceShortcut(
+            keyCode: CGKeyCode(keyCode.intValue),
+            flags: CGEventFlags(rawValue: modifiers.uint64Value)
         )
     }
 
-    func select(_ inputSource: DispatchInputSource) -> OSStatus {
+    func ensurePostEventAccess() -> Bool {
+        if CGPreflightPostEventAccess() {
+            return true
+        }
+        guard !didRequestPostEventAccess else { return false }
+        didRequestPostEventAccess = true
+        return CGRequestPostEventAccess()
+    }
+
+    func select(_ inputSource: SwitchableInputSource) -> OSStatus {
         guard let tisInputSource = inputSource.tisInputSource else {
             return OSStatus(paramErr)
         }
         return TISSelectInputSource(tisInputSource)
     }
 
-    func postPreviousInputSourceShortcut(
-        _ shortcut: NativePreviousInputSourceShortcut,
-        eventSourceState: CGEventSourceStateID,
-        marker: Int64,
-        didPost: (NativeKeyEventPhase) -> Void
-    ) throws {
-        guard let source = CGEventSource(stateID: eventSourceState),
+    func postPreviousInputSourceShortcut(_ shortcut: PreviousInputSourceShortcut) -> Bool {
+        guard let source = CGEventSource(stateID: .hidSystemState),
               let keyDown = CGEvent(
                 keyboardEventSource: source,
                 virtualKey: shortcut.keyCode,
@@ -253,496 +144,136 @@ final class LiveInputSourceDispatchSystem: InputSourceDispatchSystem {
                 virtualKey: shortcut.keyCode,
                 keyDown: false
               ) else {
-            throw InputSourceDispatchError.nativeEventCreationFailed
+            return false
         }
 
-        keyDown.flags = shortcut.eventFlags
-        keyDown.setIntegerValueField(.eventSourceUserData, value: marker)
-        keyUp.flags = shortcut.eventFlags
-        keyUp.setIntegerValueField(.eventSourceUserData, value: marker)
-
+        keyDown.flags = shortcut.flags
+        keyUp.flags = shortcut.flags
         keyDown.post(tap: .cghidEventTap)
-        didPost(.keyDown)
         keyUp.post(tap: .cghidEventTap)
-        didPost(.keyUp)
-    }
-}
-
-struct PostDispatchVerification: Equatable {
-    let requestID: UInt64
-    let targetID: String
-    let callbackEnteredAt: UInt64
-}
-
-enum PostDispatchVerificationOutcome: Equatable {
-    case current
-    case superseded
-    case mismatch(currentID: String?)
-}
-
-struct SynchronousDispatchResult {
-    let error: InputSourceDispatchError?
-    let verification: PostDispatchVerification?
-    let callbackToNativeKeyUpNanoseconds: UInt64?
-
-    init(
-        error: InputSourceDispatchError? = nil,
-        verification: PostDispatchVerification? = nil,
-        callbackToNativeKeyUpNanoseconds: UInt64? = nil
-    ) {
-        self.error = error
-        self.verification = verification
-        self.callbackToNativeKeyUpNanoseconds = callbackToNativeKeyUpNanoseconds
+        return true
     }
 }
 
 @MainActor
-final class InputSourceSelector {
-    private struct ComplexDispatchConfiguration {
-        let target: DispatchInputSource
-        let bridge: DispatchInputSource
-        let shortcut: NativePreviousInputSourceShortcut
-        let permission: PostEventPermissionState
+final class InputSourceSwitcher {
+    private struct ComplexSwitch {
+        let target: SwitchableInputSource
+        let bridge: SwitchableInputSource
+        let shortcut: PreviousInputSourceShortcut
     }
 
-    private enum PreparedTarget {
-        case ordinary(DispatchInputSource)
-        case complex(Result<ComplexDispatchConfiguration, InputSourceDispatchError>)
+    private enum PreparedSwitch {
+        case ordinary(SwitchableInputSource)
+        case complex(ComplexSwitch)
+        case unavailable(InputSourceSwitchError)
     }
 
-    private struct TimedPhase {
-        let name: String
-        let observedAt: UInt64
-        let status: OSStatus?
-        let outcome: String
-    }
+    static let shared = InputSourceSwitcher()
 
-    static let shared = InputSourceSelector()
-    static let internalEventMarker: Int64 = 0x436875616E
-
-    private static let logger = Logger(
-        subsystem: "com.chuan.Chuan",
-        category: "InputSourceDispatch"
-    )
-    // Carbon can deliver the posted shortcut callback after the native post returns.
-    private static let suppressionDurationNanoseconds: UInt64 = 1_000_000_000
-    // Verification runs later so it cannot delay the native key events.
-    private static let verificationDelayNanoseconds: UInt64 = 100_000_000
-
-    private let system: InputSourceDispatchSystem
-    private let monotonicNow: () -> UInt64
-    private let diagnosticSink: ((String) -> Void)?
-    private let setupFailureReporter: ((InputSourceDispatchError) -> Void)?
-    private var preparedTargets: [String: PreparedTarget] = [:]
-    private var shortcutSignatures: [String: ShortcutSignature] = [:]
-    private var shortcutSuppressions: [ShortcutSignature: UInt64] = [:]
+    private let system: InputSourceSwitchingSystem
+    private let setupFailureReporter: ((InputSourceSwitchError) -> Void)?
+    private var preparedSwitches: [String: PreparedSwitch] = [:]
     private var reportedSetupFailures = Set<String>()
-    private var latestRequestID: UInt64 = 0
-    private var verificationTask: Task<Void, Never>?
 
     init(
-        system: InputSourceDispatchSystem? = nil,
-        monotonicNow: @escaping () -> UInt64 = {
-            DispatchTime.now().uptimeNanoseconds
-        },
-        diagnostics: ((String) -> Void)? = nil,
-        reportSetupFailure: ((InputSourceDispatchError) -> Void)? = nil
+        system: InputSourceSwitchingSystem? = nil,
+        reportSetupFailure: ((InputSourceSwitchError) -> Void)? = nil
     ) {
-        self.system = system ?? LiveInputSourceDispatchSystem()
-        self.monotonicNow = monotonicNow
-        diagnosticSink = diagnostics
+        self.system = system ?? LiveInputSourceSwitchingSystem()
         setupFailureReporter = reportSetupFailure
     }
 
-    func prepare(
-        _ inputSources: [DispatchInputSource],
-        shortcutSignatures: [String: ShortcutSignature]
-    ) {
-        preparedTargets = [:]
-        self.shortcutSignatures = shortcutSignatures
-        reportedSetupFailures.removeAll()
+    func prepare(_ inputSources: [SwitchableInputSource]) {
+        preparedSwitches = [:]
+        let complexSources = inputSources.filter { !$0.isKeyboardLayout }
 
-        let complexTargets = inputSources.filter { !$0.isKeyboardLayout }
-        for target in inputSources where target.isKeyboardLayout {
-            preparedTargets[target.id] = .ordinary(target)
+        for source in inputSources where source.isKeyboardLayout {
+            preparedSwitches[source.id] = .ordinary(source)
         }
-        guard !complexTargets.isEmpty else { return }
+        guard !complexSources.isEmpty else { return }
 
         let setup: Result<(
-            bridge: DispatchInputSource,
-            shortcut: NativePreviousInputSourceShortcut,
-            permission: PostEventPermissionState
-        ), InputSourceDispatchError>
+            bridge: SwitchableInputSource,
+            shortcut: PreviousInputSourceShortcut
+        ), InputSourceSwitchError>
         do {
             guard let bridge = system.asciiCapableKeyboardLayouts().first else {
-                throw InputSourceDispatchError.noBridge
+                throw InputSourceSwitchError.asciiBridgeUnavailable
             }
-            let shortcut: NativePreviousInputSourceShortcut
-            do {
-                shortcut = try system.previousInputSourceShortcut()
-            } catch let error as SymbolicHotKeyError {
-                throw InputSourceDispatchError.symbolicHotKey(error)
+            let shortcut = try system.previousInputSourceShortcut()
+            guard system.ensurePostEventAccess() else {
+                throw InputSourceSwitchError.postEventPermissionDenied
             }
-            let permission = system.ensurePostEventAccess()
-            guard permission.isGranted else {
-                throw InputSourceDispatchError.postEventPermissionDenied
-            }
-            setup = .success((bridge, shortcut, permission))
-        } catch let error as InputSourceDispatchError {
+            setup = .success((bridge, shortcut))
+        } catch let error as InputSourceSwitchError {
             setup = .failure(error)
         } catch {
-            setup = .failure(.symbolicHotKey(.malformed))
+            setup = .failure(.previousSourceShortcutUnavailable)
         }
 
-        for target in complexTargets {
+        for target in complexSources {
             switch setup {
             case let .success(setup):
-                preparedTargets[target.id] = .complex(.success(
-                    ComplexDispatchConfiguration(
-                        target: target,
-                        bridge: setup.bridge,
-                        shortcut: setup.shortcut,
-                        permission: setup.permission
-                    )
+                preparedSwitches[target.id] = .complex(ComplexSwitch(
+                    target: target,
+                    bridge: setup.bridge,
+                    shortcut: setup.shortcut
                 ))
             case let .failure(error):
-                preparedTargets[target.id] = .complex(.failure(error))
+                preparedSwitches[target.id] = .unavailable(error)
             }
         }
     }
 
-    func updateShortcutSignature(
-        _ signature: ShortcutSignature?,
-        for sourceID: String
-    ) {
-        shortcutSignatures[sourceID] = signature
-    }
-
-    func shouldHandleShortcut(for sourceID: String) -> Bool {
-        let now = monotonicNow()
-        shortcutSuppressions = shortcutSuppressions.filter { $0.value > now }
-        guard let signature = shortcutSignatures[sourceID] else { return true }
-        return shortcutSuppressions[signature] == nil
-    }
-
-    func dispatch(
-        sourceID: String,
-        callbackEnteredAt: UInt64
-    ) -> SynchronousDispatchResult {
-        precondition(Thread.isMainThread, "Input-source dispatch must execute on the main thread")
-        verificationTask?.cancel()
-        verificationTask = nil
-        latestRequestID &+= 1
-        let requestID = latestRequestID
-
-        guard let preparedTarget = preparedTargets[sourceID] else {
-            let error = InputSourceDispatchError.targetUnavailable(sourceID)
-            reportDispatch(
-                requestID: requestID,
-                targetID: sourceID,
-                callbackEnteredAt: callbackEnteredAt,
-                callbackOutcome: "setup-error"
-            )
-            reportSetupFailureOnce(error, for: sourceID)
-            return SynchronousDispatchResult(error: error)
+    @discardableResult
+    func switchTo(sourceID: String) -> InputSourceSwitchError? {
+        guard let preparedSwitch = preparedSwitches[sourceID] else {
+            let error = InputSourceSwitchError.sourceUnavailable(sourceID)
+            reportSetupFailureOnce(error)
+            return error
         }
 
-        switch preparedTarget {
+        switch preparedSwitch {
         case let .ordinary(target):
-            let status = system.select(target)
-            reportDispatch(
-                requestID: requestID,
-                targetID: target.id,
-                callbackEnteredAt: callbackEnteredAt,
-                phases: [TimedPhase(
-                    name: "target-tis",
-                    observedAt: monotonicNow(),
-                    status: status,
-                    outcome: status == noErr ? "complete" : "error"
-                )]
-            )
-            guard status != noErr else { return SynchronousDispatchResult() }
-            return SynchronousDispatchResult(error: .selectionFailed(
-                phase: "target",
-                sourceID: target.id,
-                status: status
-            ))
-
-        case let .complex(.failure(error)):
-            reportDispatch(
-                requestID: requestID,
-                targetID: sourceID,
-                callbackEnteredAt: callbackEnteredAt,
-                callbackOutcome: "setup-error"
-            )
-            reportSetupFailureOnce(error, for: sourceID)
-            return SynchronousDispatchResult(error: error)
-
-        case let .complex(.success(configuration)):
-            return dispatchComplexInputMethod(
-                configuration,
-                requestID: requestID,
-                callbackEnteredAt: callbackEnteredAt
-            )
-        }
-    }
-
-    @discardableResult
-    func scheduleVerification(_ verification: PostDispatchVerification) -> Bool {
-        guard verification.requestID == latestRequestID else { return false }
-        verificationTask?.cancel()
-        verificationTask = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: Self.verificationDelayNanoseconds)
-            guard !Task.isCancelled else { return }
-            _ = self?.verify(verification)
-        }
-        return true
-    }
-
-    @discardableResult
-    func verify(
-        _ verification: PostDispatchVerification
-    ) -> PostDispatchVerificationOutcome {
-        guard verification.requestID == latestRequestID else {
-            diagnostic(
-                requestID: verification.requestID,
-                phase: "verification",
-                targetID: verification.targetID,
-                callbackEnteredAt: verification.callbackEnteredAt,
-                observedAt: monotonicNow(),
-                status: nil,
-                outcome: "superseded"
-            )
-            return .superseded
-        }
-
-        let currentSourceID = system.currentSourceID
-        let outcome: PostDispatchVerificationOutcome = currentSourceID == verification.targetID
-            ? .current
-            : .mismatch(currentID: currentSourceID)
-        diagnostic(
-            requestID: verification.requestID,
-            phase: "verification",
-            targetID: verification.targetID,
-            callbackEnteredAt: verification.callbackEnteredAt,
-            observedAt: monotonicNow(),
-            status: nil,
-            outcome: currentSourceID == verification.targetID ? "complete" : "mismatch",
-            currentSourceID: currentSourceID
-        )
-        return outcome
-    }
-
-    private func dispatchComplexInputMethod(
-        _ configuration: ComplexDispatchConfiguration,
-        requestID: UInt64,
-        callbackEnteredAt: UInt64
-    ) -> SynchronousDispatchResult {
-        let targetStatus = system.select(configuration.target)
-        let targetReturnedAt = monotonicNow()
-        let targetPhase = TimedPhase(
-            name: "target-tis",
-            observedAt: targetReturnedAt,
-            status: targetStatus,
-            outcome: targetStatus == noErr ? "complete" : "error"
-        )
-        guard targetStatus == noErr else {
-            reportDispatch(
-                requestID: requestID,
-                targetID: configuration.target.id,
-                callbackEnteredAt: callbackEnteredAt,
-                phases: [targetPhase],
-                permission: configuration.permission
-            )
-            return SynchronousDispatchResult(error: .selectionFailed(
-                phase: "target",
-                sourceID: configuration.target.id,
-                status: targetStatus
-            ))
-        }
-
-        let bridgeStatus = system.select(configuration.bridge)
-        let bridgeReturnedAt = monotonicNow()
-        let bridgePhase = TimedPhase(
-            name: "bridge-tis",
-            observedAt: bridgeReturnedAt,
-            status: bridgeStatus,
-            outcome: bridgeStatus == noErr ? "complete" : "error"
-        )
-        guard bridgeStatus == noErr else {
-            reportDispatch(
-                requestID: requestID,
-                targetID: configuration.target.id,
-                callbackEnteredAt: callbackEnteredAt,
-                phases: [targetPhase, bridgePhase],
-                permission: configuration.permission
-            )
-            return SynchronousDispatchResult(error: .selectionFailed(
-                phase: "bridge",
-                sourceID: configuration.bridge.id,
-                status: bridgeStatus
-            ))
-        }
-
-        shortcutSuppressions[configuration.shortcut.signature] =
-            monotonicNow() &+ Self.suppressionDurationNanoseconds
-        var keyDownPostedAt: UInt64?
-        var keyUpPostedAt: UInt64?
-        do {
-            try system.postPreviousInputSourceShortcut(
-                configuration.shortcut,
-                eventSourceState: .hidSystemState,
-                marker: Self.internalEventMarker
-            ) { phase in
-                switch phase {
-                case .keyDown:
-                    keyDownPostedAt = monotonicNow()
-                case .keyUp:
-                    keyUpPostedAt = monotonicNow()
-                }
+            return select(target, phase: "target")
+        case let .complex(inputMethodSwitch):
+            if let error = select(inputMethodSwitch.target, phase: "target") {
+                return error
             }
-        } catch {
-            let dispatchError = error as? InputSourceDispatchError
-                ?? .nativeEventCreationFailed
-            reportDispatch(
-                requestID: requestID,
-                targetID: configuration.target.id,
-                callbackEnteredAt: callbackEnteredAt,
-                phases: [
-                    targetPhase,
-                    bridgePhase,
-                    TimedPhase(
-                        name: "native-events",
-                        observedAt: monotonicNow(),
-                        status: nil,
-                        outcome: "error"
-                    )
-                ],
-                permission: configuration.permission
-            )
-            return SynchronousDispatchResult(error: dispatchError)
-        }
-
-        guard let keyDownPostedAt, let keyUpPostedAt else {
-            return SynchronousDispatchResult(error: .nativeEventCreationFailed)
-        }
-        reportDispatch(
-            requestID: requestID,
-            targetID: configuration.target.id,
-            callbackEnteredAt: callbackEnteredAt,
-            phases: [
-                targetPhase,
-                bridgePhase,
-                TimedPhase(
-                    name: "native-key-down",
-                    observedAt: keyDownPostedAt,
-                    status: nil,
-                    outcome: "posted"
-                ),
-                TimedPhase(
-                    name: "native-key-up",
-                    observedAt: keyUpPostedAt,
-                    status: nil,
-                    outcome: "posted"
-                )
-            ],
-            permission: configuration.permission
-        )
-        return SynchronousDispatchResult(
-            verification: PostDispatchVerification(
-                requestID: requestID,
-                targetID: configuration.target.id,
-                callbackEnteredAt: callbackEnteredAt
-            ),
-            callbackToNativeKeyUpNanoseconds: elapsedNanoseconds(
-                since: callbackEnteredAt,
-                now: keyUpPostedAt
-            )
-        )
-    }
-
-    private func reportDispatch(
-        requestID: UInt64,
-        targetID: String,
-        callbackEnteredAt: UInt64,
-        callbackOutcome: String = "started",
-        phases: [TimedPhase] = [],
-        permission: PostEventPermissionState? = nil
-    ) {
-        diagnostic(
-            requestID: requestID,
-            phase: "callback-entry",
-            targetID: targetID,
-            callbackEnteredAt: callbackEnteredAt,
-            observedAt: callbackEnteredAt,
-            status: nil,
-            outcome: callbackOutcome,
-            permission: permission
-        )
-        for phase in phases {
-            diagnostic(
-                requestID: requestID,
-                phase: phase.name,
-                targetID: targetID,
-                callbackEnteredAt: callbackEnteredAt,
-                observedAt: phase.observedAt,
-                status: phase.status,
-                outcome: phase.outcome,
-                permission: permission
-            )
+            if let error = select(inputMethodSwitch.bridge, phase: "bridge") {
+                return error
+            }
+            guard system.postPreviousInputSourceShortcut(inputMethodSwitch.shortcut) else {
+                return .nativeEventCreationFailed
+            }
+            return nil
+        case let .unavailable(error):
+            reportSetupFailureOnce(error)
+            return error
         }
     }
 
-    private func reportSetupFailureOnce(
-        _ error: InputSourceDispatchError,
-        for sourceID: String
-    ) {
-        let failureKey = error.localizedDescription
-        guard reportedSetupFailures.insert(failureKey).inserted else { return }
-        emitDiagnostic(
-            "phase=setup target=\(sourceID) elapsed_ns=0 status=n/a "
-                + "outcome=error reason=\(error.localizedDescription)"
+    private func select(
+        _ inputSource: SwitchableInputSource,
+        phase: String
+    ) -> InputSourceSwitchError? {
+        let status = system.select(inputSource)
+        guard status != noErr else { return nil }
+        return .selectionFailed(
+            phase: phase,
+            sourceID: inputSource.id,
+            status: status
         )
+    }
+
+    private func reportSetupFailureOnce(_ error: InputSourceSwitchError) {
+        guard reportedSetupFailures.insert(error.localizedDescription).inserted else { return }
         if let setupFailureReporter {
             setupFailureReporter(error)
-        } else {
-            Self.presentSetupFailure(error)
+            return
         }
-    }
 
-    private func diagnostic(
-        requestID: UInt64,
-        phase: String,
-        targetID: String,
-        callbackEnteredAt: UInt64,
-        observedAt: UInt64,
-        status: OSStatus?,
-        outcome: String,
-        currentSourceID: String? = nil,
-        permission: PostEventPermissionState? = nil
-    ) {
-        emitDiagnostic(
-            "request=\(requestID) phase=\(phase) target=\(targetID) "
-                + "current=\(currentSourceID ?? "not-checked") "
-                + "elapsed_ns=\(elapsedNanoseconds(since: callbackEnteredAt, now: observedAt)) "
-                + "status=\(status.map(String.init) ?? "n/a") "
-                + "permission=\(permission?.rawValue ?? "n/a") outcome=\(outcome)"
-        )
-    }
-
-    private func emitDiagnostic(_ message: String) {
-        if let diagnosticSink {
-            diagnosticSink(message)
-        } else {
-            Self.logger.notice("\(message, privacy: .public)")
-        }
-    }
-
-    private func elapsedNanoseconds(since start: UInt64, now: UInt64) -> UInt64 {
-        now >= start ? now - start : 0
-    }
-
-    private static func presentSetupFailure(_ error: InputSourceDispatchError) {
         let alert = NSAlert()
         alert.alertStyle = .warning
         alert.messageText = "Input-source setup is incomplete"

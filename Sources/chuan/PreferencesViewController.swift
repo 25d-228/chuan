@@ -159,17 +159,7 @@ final class PreferencesViewController: NSViewController {
         label.setContentHuggingPriority(.defaultLow, for: .horizontal)
         label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
-        let recorder = KeyboardShortcuts.RecorderCocoa(for: source.shortcutName) { shortcut in
-            InputSourceSelector.shared.updateShortcutSignature(
-                shortcut.map {
-                    ShortcutSignature(
-                        keyCode: $0.carbonKeyCode,
-                        carbonModifiers: $0.carbonModifiers
-                    )
-                },
-                for: source.id
-            )
-        }
+        let recorder = KeyboardShortcuts.RecorderCocoa(for: source.shortcutName)
         recorder.bezelStyle = .squareBezel
         recorder.focusRingType = .none
         recorder.font = Typeface.display(11, weight: .regular)
