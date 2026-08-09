@@ -155,7 +155,7 @@ struct PostEventAccessController {
     }
 }
 
-enum InputSourceHandoffError: LocalizedError {
+enum InputSourceHandoffError: LocalizedError, Equatable {
     case noBridge(String)
     case selectionFailed(phase: String, sourceID: String, status: OSStatus)
     case transitionTimedOut(phase: String, expectedID: String, currentID: String?)
@@ -217,8 +217,17 @@ final class LiveInputSourceHandoffSystem: InputSourceHandoffSystem {
     }
 
     func asciiCapableSourceStates() -> [InputSourceState] {
-        let list = TISCreateASCIICapableInputSourceList().takeRetainedValue()
-        return ((list as NSArray) as? [TISInputSource] ?? [])
+        guard let list = TISCreateASCIICapableInputSourceList() else {
+            return []
+        }
+        return Self.inputSourceStates(from: list)
+    }
+
+    nonisolated static func inputSourceStates(
+        from list: Unmanaged<CFArray>?
+    ) -> [InputSourceState] {
+        guard let list else { return [] }
+        return ((list.takeRetainedValue() as NSArray) as? [TISInputSource] ?? [])
             .compactMap(InputSourceState.init)
     }
 
@@ -326,20 +335,31 @@ protocol InputSourceSelecting: AnyObject {
         _ target: InputSourceSelectionTarget,
         isSuperseded: @escaping @MainActor () -> Bool
     ) async throws
-    func isInternallyPosting(_ signature: ShortcutSignature) -> Bool
+    func consumeInternallyPostedShortcut(_ signature: ShortcutSignature) -> Bool
 }
 
 @MainActor
 final class NativeInputSourceHandoff: InputSourceSelecting {
+    private struct ShortcutSuppression {
+        let id: Int
+        let signature: ShortcutSignature
+        var expiresAt: Date?
+    }
+
     private static let shortcutModifiers: NSEvent.ModifierFlags = [
         .command, .control, .option, .shift
     ]
+    // Carbon callbacks should arrive promptly; this grace period covers delayed main-loop
+    // delivery after the transaction without suppressing a later physical shortcut forever.
+    private static let callbackSuppressionInterval: TimeInterval = 1
 
     private let system: InputSourceHandoffSystem
     private let notificationCenter: NotificationCenter
     private let phaseTimeout: TimeInterval
     private let diagnostics: (String) -> Void
-    private var postedShortcutSignature: ShortcutSignature?
+    private var shortcutSuppressions: [ShortcutSuppression] = []
+    private var currentSuppressionID: Int?
+    private var nextSuppressionID = 0
 
     init(
         system: InputSourceHandoffSystem? = nil,
@@ -418,17 +438,33 @@ final class NativeInputSourceHandoff: InputSourceSelecting {
             )
             try await settle(sourceID: target.id, permission: permission)
         } catch {
+            finishCurrentShortcutSuppression()
             restoreTargetIfBridgeRemainsActive(target.id)
             throw error
         }
+        finishCurrentShortcutSuppression()
 
         if isSuperseded() {
             throw SupersededInputSourceRequest()
         }
     }
 
-    func isInternallyPosting(_ signature: ShortcutSignature) -> Bool {
-        postedShortcutSignature == signature
+    func isSuppressingInternallyPostedShortcut(
+        _ signature: ShortcutSignature
+    ) -> Bool {
+        removeExpiredShortcutSuppressions()
+        return shortcutSuppressions.contains { $0.signature == signature }
+    }
+
+    func consumeInternallyPostedShortcut(_ signature: ShortcutSignature) -> Bool {
+        removeExpiredShortcutSuppressions()
+        guard let index = shortcutSuppressions.firstIndex(where: {
+            $0.signature == signature
+        }) else {
+            return false
+        }
+        shortcutSuppressions.remove(at: index)
+        return true
     }
 
     nonisolated static func resolveBridge(
@@ -543,11 +579,13 @@ final class NativeInputSourceHandoff: InputSourceSelecting {
         let observation = InputSourceChangeObservation(center: notificationCenter)
         defer { observation.stop() }
 
-        postedShortcutSignature = shortcut.signature
-        defer { postedShortcutSignature = nil }
+        let suppressionID = beginShortcutSuppression(for: shortcut.signature)
+        currentSuppressionID = suppressionID
         do {
             try system.postPreviousInputSourceShortcut(shortcut)
         } catch {
+            discardShortcutSuppression(suppressionID)
+            currentSuppressionID = nil
             diagnostics(
                 diagnosticLine(
                     phase: phase,
@@ -571,6 +609,44 @@ final class NativeInputSourceHandoff: InputSourceSelecting {
             permission: permission,
             status: nil
         )
+    }
+
+    private func beginShortcutSuppression(for signature: ShortcutSignature) -> Int {
+        removeExpiredShortcutSuppressions()
+        nextSuppressionID &+= 1
+        shortcutSuppressions.append(
+            ShortcutSuppression(
+                id: nextSuppressionID,
+                signature: signature,
+                expiresAt: nil
+            )
+        )
+        return nextSuppressionID
+    }
+
+    private func finishCurrentShortcutSuppression() {
+        guard let suppressionID = currentSuppressionID else { return }
+        currentSuppressionID = nil
+        guard let index = shortcutSuppressions.firstIndex(where: {
+            $0.id == suppressionID
+        }) else {
+            return
+        }
+        shortcutSuppressions[index].expiresAt = Date().addingTimeInterval(
+            Self.callbackSuppressionInterval
+        )
+    }
+
+    private func discardShortcutSuppression(_ suppressionID: Int) {
+        shortcutSuppressions.removeAll { $0.id == suppressionID }
+    }
+
+    private func removeExpiredShortcutSuppressions() {
+        let now = Date()
+        shortcutSuppressions.removeAll {
+            guard let expiresAt = $0.expiresAt else { return false }
+            return expiresAt <= now
+        }
     }
 
     private func waitForSource(
@@ -739,7 +815,7 @@ final class InputSourceSelector {
     }
 
     func shouldHandleShortcut(_ signature: ShortcutSignature) -> Bool {
-        !selection.isInternallyPosting(signature)
+        !selection.consumeInternallyPostedShortcut(signature)
     }
 
     private func drainPendingRequests() async {

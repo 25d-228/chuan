@@ -113,6 +113,22 @@ func bridgeResolutionUsesEnabledASCIIKeyboardLayout() {
     #expect(bridge?.id == "layout-a")
 }
 
+@Test("unavailable ASCII-capable source discovery returns an empty list")
+func unavailableASCIICapableSourceDiscoveryReturnsEmptyList() {
+    #expect(
+        LiveInputSourceHandoffSystem.inputSourceStates(from: nil).isEmpty
+    )
+}
+
+@Test("empty ASCII-capable source discovery returns an empty list")
+func emptyASCIICapableSourceDiscoveryReturnsEmptyList() {
+    let emptyList = Unmanaged.passRetained(NSArray() as CFArray)
+
+    #expect(
+        LiveInputSourceHandoffSystem.inputSourceStates(from: emptyList).isEmpty
+    )
+}
+
 @Test("symbolic hotkey 60 parses key code and explicitly converts modifiers")
 func symbolicHotKeyParsesKeyCodeAndModifiers() throws {
     let storedModifiers = CGEventFlags.maskControl.rawValue
@@ -304,6 +320,37 @@ func permissionDenialDoesNotChangeCurrentSource() async {
     #expect(system.currentSourceID == "layout-a")
 }
 
+@Test("empty bridge discovery follows the no-bridge failure path")
+@MainActor
+func emptyBridgeDiscoveryReportsNoBridge() async {
+    let center = NotificationCenter()
+    let system = FakeInputSourceHandoffSystem(
+        currentSourceID: "method-current",
+        notificationCenter: center
+    )
+    system.states["method-current"] = sourceState(
+        id: "method-current",
+        isKeyboardLayout: false,
+        isASCIICapable: false
+    )
+    system.states["method-b"] = sourceState(
+        id: "method-b",
+        isKeyboardLayout: false,
+        isASCIICapable: false
+    )
+    let handoff = makeHandoff(system: system, center: center)
+
+    await #expect(throws: InputSourceHandoffError.noBridge("method-b")) {
+        try await handoff.select(
+            InputSourceSelectionTarget(id: "method-b", isKeyboardLayout: false),
+            isSuperseded: { false }
+        )
+    }
+
+    #expect(system.operations.isEmpty)
+    #expect(system.currentSourceID == "method-current")
+}
+
 @Test("superseded request stops after seeding the target and never leaves a bridge active")
 @MainActor
 func supersededRequestStopsBeforeBridge() async {
@@ -364,7 +411,9 @@ func internallyPostedShortcutIsMarkedDuringDelivery() async throws {
     let handoff = makeHandoff(system: system, center: center)
     var wasMarked = false
     system.onPost = { shortcut in
-        wasMarked = handoff.isInternallyPosting(shortcut.signature)
+        wasMarked = handoff.isSuppressingInternallyPostedShortcut(
+            shortcut.signature
+        )
     }
 
     try await handoff.select(
@@ -373,24 +422,54 @@ func internallyPostedShortcutIsMarkedDuringDelivery() async throws {
     )
 
     #expect(wasMarked)
-    #expect(!handoff.isInternallyPosting(system.shortcut.signature))
+    #expect(
+        handoff.isSuppressingInternallyPostedShortcut(
+            system.shortcut.signature
+        )
+    )
+    #expect(handoff.consumeInternallyPostedShortcut(system.shortcut.signature))
+    #expect(
+        !handoff.isSuppressingInternallyPostedShortcut(
+            system.shortcut.signature
+        )
+    )
 }
 
-@Test("internally posted shortcut cannot recursively enqueue a selection")
+@Test("delayed internally posted callback cannot recursively enqueue a selection")
 @MainActor
-func internallyPostedShortcutCannotEnqueueSelection() {
-    let signature = ShortcutSignature(keyCode: 49, carbonModifiers: controlKey)
-    let selection = SlowFakeSelection()
-    selection.internallyPostedSignature = signature
-    let selector = InputSourceSelector(selection: selection, reportFailure: { _ in })
-
-    if selector.shouldHandleShortcut(signature) {
-        selector.request(
-            InputSourceSelectionTarget(id: "method-b", isKeyboardLayout: false)
-        )
+func delayedInternallyPostedCallbackCannotEnqueueSelection() async throws {
+    let center = NotificationCenter()
+    let system = FakeInputSourceHandoffSystem(
+        currentSourceID: "layout-a",
+        notificationCenter: center
+    )
+    system.states["layout-a"] = sourceState(id: "layout-a")
+    system.states["method-b"] = sourceState(id: "method-b", isKeyboardLayout: false)
+    let handoff = makeHandoff(system: system, center: center)
+    let selector = InputSourceSelector(selection: handoff, reportFailure: { _ in })
+    let target = InputSourceSelectionTarget(id: "method-b", isKeyboardLayout: false)
+    var delayedCallback: (() -> Void)?
+    var callbackWasDelivered = false
+    system.onPost = { shortcut in
+        delayedCallback = {
+            Task { @MainActor in
+                if selector.shouldHandleShortcut(shortcut.signature) {
+                    selector.request(target)
+                }
+                callbackWasDelivered = true
+            }
+        }
     }
 
-    #expect(selection.startedTargets.isEmpty)
+    selector.request(target)
+    try await waitUntil { selector.isIdle }
+    let completedOperations = system.operations
+    let callback = try #require(delayedCallback)
+    callback()
+    try await waitUntil { callbackWasDelivered }
+
+    #expect(system.operations == completedOperations)
+    #expect(selector.isIdle)
 }
 
 private func sourceState(
@@ -577,7 +656,6 @@ private final class SlowFakeSelection: InputSourceSelecting {
     private(set) var startedTargets: [InputSourceSelectionTarget] = []
     private(set) var completedTargets: [InputSourceSelectionTarget] = []
     private(set) var maximumConcurrentSelections = 0
-    var internallyPostedSignature: ShortcutSignature?
     private var concurrentSelections = 0
 
     func select(
@@ -599,7 +677,7 @@ private final class SlowFakeSelection: InputSourceSelecting {
         completedTargets.append(target)
     }
 
-    func isInternallyPosting(_ signature: ShortcutSignature) -> Bool {
-        internallyPostedSignature == signature
+    func consumeInternallyPostedShortcut(_ signature: ShortcutSignature) -> Bool {
+        false
     }
 }
