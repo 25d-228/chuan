@@ -28,6 +28,14 @@ extension TISInputSource {
         (propertyValue(kTISPropertyInputSourceIsSelectCapable) as? Bool) ?? false
     }
 
+    var isEnabled: Bool {
+        (propertyValue(kTISPropertyInputSourceIsEnabled) as? Bool) ?? false
+    }
+
+    var isASCIICapable: Bool {
+        (propertyValue(kTISPropertyInputSourceIsASCIICapable) as? Bool) ?? false
+    }
+
     var iconImageURL: URL? {
         propertyValue(kTISPropertyIconImageURL) as? URL
     }
