@@ -20,7 +20,8 @@ let package = Package(
             ]
         ),
         .testTarget(
-            name: "ChuanTests"
+            name: "ChuanTests",
+            dependencies: ["chuan"]
         )
     ]
 )

@@ -1,56 +1,291 @@
 import AppKit
 import Carbon
+import CoreGraphics
 import Foundation
 
-struct InputSourceSelectionError: LocalizedError {
-    let sourceID: String
-    let status: OSStatus
+struct SwitchableInputSource: Equatable {
+    let id: String
+    let isKeyboardLayout: Bool
+    fileprivate let tisInputSource: TISInputSource?
+
+    init(_ inputSource: InputSource) {
+        id = inputSource.id
+        isKeyboardLayout = inputSource.source.inputSourceType == kTISTypeKeyboardLayout as String
+        tisInputSource = inputSource.source
+    }
+
+    init(id: String, isKeyboardLayout: Bool) {
+        self.id = id
+        self.isKeyboardLayout = isKeyboardLayout
+        tisInputSource = nil
+    }
+
+    fileprivate init?(tisInputSource: TISInputSource) {
+        guard let id = tisInputSource.identifier else { return nil }
+        self.id = id
+        isKeyboardLayout = tisInputSource.inputSourceType == kTISTypeKeyboardLayout as String
+        self.tisInputSource = tisInputSource
+    }
+
+    static func == (lhs: SwitchableInputSource, rhs: SwitchableInputSource) -> Bool {
+        lhs.id == rhs.id && lhs.isKeyboardLayout == rhs.isKeyboardLayout
+    }
+}
+
+struct PreviousInputSourceShortcut: Equatable {
+    let keyCode: CGKeyCode
+    let flags: CGEventFlags
+}
+
+enum InputSourceSwitchError: LocalizedError, Equatable {
+    case sourceUnavailable(String)
+    case asciiBridgeUnavailable
+    case previousSourceShortcutUnavailable
+    case postEventPermissionDenied
+    case selectionFailed(phase: String, sourceID: String, status: OSStatus)
+    case nativeEventCreationFailed
 
     var errorDescription: String? {
-        "Could not select input source \(sourceID) (TIS status \(status))"
+        switch self {
+        case let .sourceUnavailable(sourceID):
+            return "Input source \(sourceID) is unavailable. Refresh input sources and try again."
+        case .asciiBridgeUnavailable:
+            return "Enable an ASCII keyboard layout before switching to a complex input method."
+        case .previousSourceShortcutUnavailable:
+            return "Enable Select the previous input source in System Settings > Keyboard > Keyboard Shortcuts > Input Sources."
+        case .postEventPermissionDenied:
+            return "Enable Chuan in System Settings > Privacy & Security > Accessibility, then quit and reopen Chuan."
+        case let .selectionFailed(phase, sourceID, status):
+            return "Could not select \(sourceID) during \(phase) (TIS status \(status))."
+        case .nativeEventCreationFailed:
+            return "Chuan could not post the macOS previous-input-source shortcut."
+        }
     }
 }
 
 @MainActor
-final class InputSourceSelector {
-    static let shared = InputSourceSelector()
+protocol InputSourceSwitchingSystem: AnyObject {
+    func asciiCapableKeyboardLayouts() -> [SwitchableInputSource]
+    func previousInputSourceShortcut() throws -> PreviousInputSourceShortcut
+    func ensurePostEventAccess() -> Bool
+    func select(_ inputSource: SwitchableInputSource) -> OSStatus
+    func postPreviousInputSourceShortcut(_ shortcut: PreviousInputSourceShortcut) -> Bool
+}
 
-    private static let shortcutModifiers: NSEvent.ModifierFlags = [
-        .command, .control, .option, .shift
-    ]
+@MainActor
+final class LiveInputSourceSwitchingSystem: InputSourceSwitchingSystem {
+    private static let previousInputSourceShortcutID = "60"
+    private static let keyCodeParameterIndex = 1
+    private static let modifierParameterIndex = 2
 
-    private init() {}
+    private var didRequestPostEventAccess = false
 
-    func select(_ inputSource: InputSource) async throws {
-        let previousInputSource = TISCopyCurrentKeyboardInputSource()?.takeRetainedValue()
-        let isKeyboardLayout = inputSource.source.inputSourceType == kTISTypeKeyboardLayout as String
-
-        if !isKeyboardLayout {
-            // Poll every 10 ms to avoid the Input Monitoring permission required by a global monitor.
-            while !NSEvent.modifierFlags.intersection(Self.shortcutModifiers).isEmpty {
-                try await Task.sleep(nanoseconds: 10_000_000)
+    func asciiCapableKeyboardLayouts() -> [SwitchableInputSource] {
+        guard let list = TISCreateASCIICapableInputSourceList() else { return [] }
+        let sources = (list.takeRetainedValue() as NSArray) as? [TISInputSource] ?? []
+        return sources
+            .filter {
+                $0.inputSourceType == kTISTypeKeyboardLayout as String
+                    && $0.isEnabled
+                    && $0.isSelectable
+                    && $0.isASCIICapable
             }
+            .compactMap(SwitchableInputSource.init)
+            .sorted { $0.id < $1.id }
+    }
+
+    func previousInputSourceShortcut() throws -> PreviousInputSourceShortcut {
+        let domain = UserDefaults.standard.persistentDomain(
+            forName: "com.apple.symbolichotkeys"
+        ) ?? [:]
+        guard let entries = domain["AppleSymbolicHotKeys"] as? [String: Any],
+              let entry = entries[Self.previousInputSourceShortcutID] as? [String: Any],
+              (entry["enabled"] as? NSNumber)?.boolValue == true,
+              let value = entry["value"] as? [String: Any],
+              let parameters = value["parameters"] as? [Any],
+              parameters.indices.contains(Self.modifierParameterIndex),
+              let keyCode = parameters[Self.keyCodeParameterIndex] as? NSNumber,
+              let modifiers = parameters[Self.modifierParameterIndex] as? NSNumber,
+              keyCode.intValue >= 0,
+              keyCode.intValue <= Int(UInt16.max) else {
+            throw InputSourceSwitchError.previousSourceShortcutUnavailable
+        }
+        return PreviousInputSourceShortcut(
+            keyCode: CGKeyCode(keyCode.intValue),
+            flags: CGEventFlags(rawValue: modifiers.uint64Value)
+        )
+    }
+
+    func ensurePostEventAccess() -> Bool {
+        if CGPreflightPostEventAccess() {
+            return true
+        }
+        guard !didRequestPostEventAccess else { return false }
+        didRequestPostEventAccess = true
+        return CGRequestPostEventAccess()
+    }
+
+    func select(_ inputSource: SwitchableInputSource) -> OSStatus {
+        guard let tisInputSource = inputSource.tisInputSource else {
+            return OSStatus(paramErr)
+        }
+        return TISSelectInputSource(tisInputSource)
+    }
+
+    func postPreviousInputSourceShortcut(_ shortcut: PreviousInputSourceShortcut) -> Bool {
+        guard let source = CGEventSource(stateID: .hidSystemState),
+              let keyDown = CGEvent(
+                keyboardEventSource: source,
+                virtualKey: shortcut.keyCode,
+                keyDown: true
+              ),
+              let keyUp = CGEvent(
+                keyboardEventSource: source,
+                virtualKey: shortcut.keyCode,
+                keyDown: false
+              ) else {
+            return false
         }
 
-        try performSelection(inputSource.source)
+        keyDown.flags = shortcut.flags
+        keyUp.flags = shortcut.flags
+        keyDown.post(tap: .cghidEventTap)
+        keyUp.post(tap: .cghidEventTap)
+        return true
+    }
+}
 
-        guard !isKeyboardLayout, let previousInputSource,
-              previousInputSource.identifier != inputSource.id else {
+@MainActor
+final class InputSourceSwitcher {
+    private struct ComplexSwitch {
+        let target: SwitchableInputSource
+        let bridge: SwitchableInputSource
+        let shortcut: PreviousInputSourceShortcut
+    }
+
+    private enum PreparedSwitch {
+        case ordinary(SwitchableInputSource)
+        case complex(ComplexSwitch)
+        case unavailable(InputSourceSwitchError)
+    }
+
+    static let shared = InputSourceSwitcher()
+
+    private let system: InputSourceSwitchingSystem
+    private let setupFailureReporter: ((InputSourceSwitchError) -> Void)?
+    private var preparedSwitches: [String: PreparedSwitch] = [:]
+    private var reportedSetupFailures = Set<String>()
+
+    init(
+        system: InputSourceSwitchingSystem? = nil,
+        reportSetupFailure: ((InputSourceSwitchError) -> Void)? = nil
+    ) {
+        self.system = system ?? LiveInputSourceSwitchingSystem()
+        setupFailureReporter = reportSetupFailure
+    }
+
+    func prepare(_ inputSources: [SwitchableInputSource]) {
+        preparedSwitches = [:]
+        let complexSources = inputSources.filter { !$0.isKeyboardLayout }
+
+        for source in inputSources where source.isKeyboardLayout {
+            preparedSwitches[source.id] = .ordinary(source)
+        }
+        guard !complexSources.isEmpty else { return }
+
+        let setup: Result<(
+            bridge: SwitchableInputSource,
+            shortcut: PreviousInputSourceShortcut
+        ), InputSourceSwitchError>
+        do {
+            guard let bridge = system.asciiCapableKeyboardLayouts().first else {
+                throw InputSourceSwitchError.asciiBridgeUnavailable
+            }
+            let shortcut = try system.previousInputSourceShortcut()
+            setup = .success((bridge, shortcut))
+        } catch let error as InputSourceSwitchError {
+            setup = .failure(error)
+        } catch {
+            setup = .failure(.previousSourceShortcutUnavailable)
+        }
+
+        for target in complexSources {
+            switch setup {
+            case let .success(setup):
+                preparedSwitches[target.id] = .complex(ComplexSwitch(
+                    target: target,
+                    bridge: setup.bridge,
+                    shortcut: setup.shortcut
+                ))
+            case let .failure(error):
+                preparedSwitches[target.id] = .unavailable(error)
+            }
+        }
+    }
+
+    @discardableResult
+    func switchTo(sourceID: String) -> InputSourceSwitchError? {
+        guard let preparedSwitch = preparedSwitches[sourceID] else {
+            let error = InputSourceSwitchError.sourceUnavailable(sourceID)
+            reportSetupFailureOnce(error)
+            return error
+        }
+
+        switch preparedSwitch {
+        case let .ordinary(target):
+            return select(target, phase: "target")
+        case let .complex(inputMethodSwitch):
+            guard system.ensurePostEventAccess() else {
+                let error = InputSourceSwitchError.postEventPermissionDenied
+                reportSetupFailureOnce(error)
+                return error
+            }
+            if let error = select(inputMethodSwitch.target, phase: "target") {
+                return error
+            }
+            if let error = select(inputMethodSwitch.bridge, phase: "bridge") {
+                return error
+            }
+            guard system.postPreviousInputSourceShortcut(inputMethodSwitch.shortcut) else {
+                return .nativeEventCreationFailed
+            }
+            return nil
+        case let .unavailable(error):
+            reportSetupFailureOnce(error)
+            return error
+        }
+    }
+
+    private func select(
+        _ inputSource: SwitchableInputSource,
+        phase: String
+    ) -> InputSourceSwitchError? {
+        let status = system.select(inputSource)
+        guard status != noErr else { return nil }
+        return .selectionFailed(
+            phase: phase,
+            sourceID: inputSource.id,
+            status: status
+        )
+    }
+
+    private func reportSetupFailureOnce(_ error: InputSourceSwitchError) {
+        guard reportedSetupFailures.insert(error.localizedDescription).inserted else { return }
+        if let setupFailureReporter {
+            setupFailureReporter(error)
             return
         }
 
-        // Some text clients only rebind an input method after observing a complete source transition.
-        try performSelection(previousInputSource)
-        try performSelection(inputSource.source)
-    }
-
-    private func performSelection(_ inputSource: TISInputSource) throws {
-        let status = TISSelectInputSource(inputSource)
-        guard status == noErr else {
-            throw InputSourceSelectionError(
-                sourceID: inputSource.identifier ?? "unknown",
-                status: status
-            )
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Input-source setup is incomplete"
+        alert.informativeText = error.localizedDescription
+        alert.addButton(withTitle: "OK")
+        if #available(macOS 14, *) {
+            NSApp.activate()
+        } else {
+            NSApp.activate(ignoringOtherApps: true)
         }
+        alert.runModal()
     }
 }
