@@ -487,14 +487,16 @@ final class InputSourceSelector {
         }
     }
 
-    func scheduleVerification(_ verification: PostDispatchVerification) {
-        guard verification.requestID == latestRequestID else { return }
+    @discardableResult
+    func scheduleVerification(_ verification: PostDispatchVerification) -> Bool {
+        guard verification.requestID == latestRequestID else { return false }
         verificationTask?.cancel()
         verificationTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: Self.verificationDelayNanoseconds)
             guard !Task.isCancelled else { return }
             _ = self?.verify(verification)
         }
+        return true
     }
 
     @discardableResult

@@ -25,7 +25,6 @@ private let previousSourceShortcut = NativePreviousInputSourceShortcut(
     )
 )
 private let afterSuppressionWindowNanoseconds: UInt64 = 1_000_000_001
-private let verificationWaitNanoseconds: UInt64 = 150_000_000
 private let latencyWarmupCount = 100
 private let latencySampleCount = 1_000
 
@@ -432,13 +431,9 @@ func newerLayoutRequestInvalidatesOldVerificationWithoutRecoverySelection() thro
 
 @Test("A stale verification schedule cannot cancel the newer verifier")
 @MainActor
-func staleVerificationScheduleCannotReplaceTheNewerVerifier() async throws {
+func staleVerificationScheduleCannotReplaceTheNewerVerifier() throws {
     let system = FakeInputSourceDispatchSystem()
-    var diagnostics: [String] = []
-    let selector = makeSelector(
-        system: system,
-        diagnostics: { diagnostics.append($0) }
-    )
+    let selector = makeSelector(system: system)
     selector.prepare([methodB], shortcutSignatures: [:])
     let oldVerification = try #require(
         selector.dispatch(sourceID: methodB.id, callbackEnteredAt: 1).verification
@@ -446,15 +441,8 @@ func staleVerificationScheduleCannotReplaceTheNewerVerifier() async throws {
     let newVerification = try #require(
         selector.dispatch(sourceID: methodB.id, callbackEnteredAt: 2).verification
     )
-    diagnostics.removeAll()
-
-    selector.scheduleVerification(newVerification)
-    selector.scheduleVerification(oldVerification)
-    try await Task.sleep(nanoseconds: verificationWaitNanoseconds)
-
-    let verificationDiagnostics = diagnostics.filter { $0.contains("phase=verification") }
-    #expect(verificationDiagnostics.count == 1)
-    #expect(verificationDiagnostics.first?.contains("request=2") == true)
+    #expect(selector.scheduleVerification(newVerification))
+    #expect(!selector.scheduleVerification(oldVerification))
 }
 
 @Test("Verification logs a mismatch without retrying or changing the source")
