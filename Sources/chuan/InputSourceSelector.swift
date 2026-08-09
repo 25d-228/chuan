@@ -202,9 +202,6 @@ final class InputSourceSwitcher {
                 throw InputSourceSwitchError.asciiBridgeUnavailable
             }
             let shortcut = try system.previousInputSourceShortcut()
-            guard system.ensurePostEventAccess() else {
-                throw InputSourceSwitchError.postEventPermissionDenied
-            }
             setup = .success((bridge, shortcut))
         } catch let error as InputSourceSwitchError {
             setup = .failure(error)
@@ -238,6 +235,11 @@ final class InputSourceSwitcher {
         case let .ordinary(target):
             return select(target, phase: "target")
         case let .complex(inputMethodSwitch):
+            guard system.ensurePostEventAccess() else {
+                let error = InputSourceSwitchError.postEventPermissionDenied
+                reportSetupFailureOnce(error)
+                return error
+            }
             if let error = select(inputMethodSwitch.target, phase: "target") {
                 return error
             }

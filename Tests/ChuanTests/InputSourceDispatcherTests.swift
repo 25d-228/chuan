@@ -31,6 +31,7 @@ private final class FakeInputSourceSwitchingSystem: InputSourceSwitchingSystem {
     var bridgeSources = [asciiBridge]
     var shortcut: PreviousInputSourceShortcut? = previousSourceShortcut
     var hasPostEventAccess = true
+    var postEventAccessChecks = 0
     var operations: [SwitchOperation] = []
     var postedShortcuts: [PreviousInputSourceShortcut] = []
 
@@ -46,7 +47,8 @@ private final class FakeInputSourceSwitchingSystem: InputSourceSwitchingSystem {
     }
 
     func ensurePostEventAccess() -> Bool {
-        hasPostEventAccess
+        postEventAccessChecks += 1
+        return hasPostEventAccess
     }
 
     func select(_ inputSource: SwitchableInputSource) -> OSStatus {
@@ -73,6 +75,7 @@ func ordinaryLayoutPerformsOneDirectSelection() {
 
     #expect(error == nil)
     #expect(system.operations == [.select(ordinaryLayout.id)])
+    #expect(system.postEventAccessChecks == 0)
 }
 
 @Test("A complex source performs target, bridge, native key-down, and native key-up")
@@ -81,6 +84,7 @@ func complexSourcePerformsTheKawaSequence() {
     let system = FakeInputSourceSwitchingSystem()
     let switcher = InputSourceSwitcher(system: system)
     switcher.prepare([complexInputMethod])
+    #expect(system.postEventAccessChecks == 0)
 
     let error = switcher.switchTo(sourceID: complexInputMethod.id)
 
@@ -92,32 +96,42 @@ func complexSourcePerformsTheKawaSequence() {
         .nativeKeyUp
     ])
     #expect(system.postedShortcuts == [previousSourceShortcut])
+    #expect(system.postEventAccessChecks == 1)
 }
 
 @Test("Missing permission or system shortcut reports once without selecting a source")
 @MainActor
 func missingSetupReportsOnceWithoutSelectingASource() {
-    for missingPermission in [false, true] {
-        let system = FakeInputSourceSwitchingSystem()
-        let expectedError: InputSourceSwitchError
-        if missingPermission {
-            system.hasPostEventAccess = false
-            expectedError = .postEventPermissionDenied
-        } else {
-            system.shortcut = nil
-            expectedError = .previousSourceShortcutUnavailable
-        }
-        var reportedErrors: [InputSourceSwitchError] = []
-        let switcher = InputSourceSwitcher(
-            system: system,
-            reportSetupFailure: { reportedErrors.append($0) }
-        )
-        switcher.prepare([complexInputMethod])
+    let deniedSystem = FakeInputSourceSwitchingSystem()
+    deniedSystem.hasPostEventAccess = false
+    var deniedErrors: [InputSourceSwitchError] = []
+    let deniedSwitcher = InputSourceSwitcher(
+        system: deniedSystem,
+        reportSetupFailure: { deniedErrors.append($0) }
+    )
+    deniedSwitcher.prepare([complexInputMethod])
+    #expect(deniedSystem.postEventAccessChecks == 0)
 
-        _ = switcher.switchTo(sourceID: complexInputMethod.id)
-        _ = switcher.switchTo(sourceID: complexInputMethod.id)
+    _ = deniedSwitcher.switchTo(sourceID: complexInputMethod.id)
+    #expect(deniedSystem.postEventAccessChecks == 1)
+    _ = deniedSwitcher.switchTo(sourceID: complexInputMethod.id)
 
-        #expect(reportedErrors == [expectedError])
-        #expect(system.operations.isEmpty)
-    }
+    #expect(deniedErrors == [.postEventPermissionDenied])
+    #expect(deniedSystem.operations.isEmpty)
+
+    let missingShortcutSystem = FakeInputSourceSwitchingSystem()
+    missingShortcutSystem.shortcut = nil
+    var missingShortcutErrors: [InputSourceSwitchError] = []
+    let missingShortcutSwitcher = InputSourceSwitcher(
+        system: missingShortcutSystem,
+        reportSetupFailure: { missingShortcutErrors.append($0) }
+    )
+    missingShortcutSwitcher.prepare([complexInputMethod])
+    #expect(missingShortcutSystem.postEventAccessChecks == 0)
+
+    _ = missingShortcutSwitcher.switchTo(sourceID: complexInputMethod.id)
+    _ = missingShortcutSwitcher.switchTo(sourceID: complexInputMethod.id)
+
+    #expect(missingShortcutErrors == [.previousSourceShortcutUnavailable])
+    #expect(missingShortcutSystem.operations.isEmpty)
 }
