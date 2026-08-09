@@ -436,7 +436,17 @@ final class NativeInputSourceHandoff: InputSourceSelecting {
                 expectedSourceID: target.id,
                 permission: permission
             )
-            try await settle(sourceID: target.id, permission: permission)
+            try await settle(
+                sourceID: target.id,
+                permission: permission,
+                isSuperseded: isSuperseded
+            )
+        } catch let error as SupersededInputSourceRequest {
+            finishCurrentShortcutSuppression()
+            throw error
+        } catch let error as CancellationError {
+            finishCurrentShortcutSuppression()
+            throw error
         } catch {
             finishCurrentShortcutSuppression()
             restoreTargetIfBridgeRemainsActive(target.id)
@@ -702,12 +712,14 @@ final class NativeInputSourceHandoff: InputSourceSelecting {
 
     private func settle(
         sourceID: String,
-        permission: PostEventPermissionState
+        permission: PostEventPermissionState,
+        isSuperseded: @escaping @MainActor () -> Bool
     ) async throws {
         let startedAt = Date()
         // Kawa used 50 ms; one bounded interval lets the focused text client consume the native hop.
         try await Task.sleep(nanoseconds: 50_000_000)
         await yieldMainRunLoop()
+        try throwIfSuperseded(isSuperseded)
         let currentSourceID = system.currentSourceID
         diagnostics(
             "phase=settle expected=\(sourceID) current=\(currentSourceID ?? "unknown") " +

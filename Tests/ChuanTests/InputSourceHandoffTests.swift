@@ -398,6 +398,53 @@ func rapidRequestsAreSerializedWithLatestPendingTargetWinning() async throws {
     #expect(selection.maximumConcurrentSelections == 1)
 }
 
+@Test("newer layout during input-method settling supersedes without recovery or failure")
+@MainActor
+func newerLayoutDuringInputMethodSettleWinsWithoutRecoveryOrFailure() async throws {
+    let center = NotificationCenter()
+    let system = FakeInputSourceHandoffSystem(
+        currentSourceID: "layout-a",
+        notificationCenter: center
+    )
+    system.states["layout-a"] = sourceState(id: "layout-a")
+    system.states["method-b"] = sourceState(id: "method-b", isKeyboardLayout: false)
+    let handoff = makeHandoff(system: system, center: center)
+    var failures: [Error] = []
+    let selector = InputSourceSelector(
+        selection: handoff,
+        reportFailure: { failures.append($0) }
+    )
+    let inputMethod = InputSourceSelectionTarget(
+        id: "method-b",
+        isKeyboardLayout: false
+    )
+    let newerLayout = InputSourceSelectionTarget(
+        id: "layout-a",
+        isKeyboardLayout: true
+    )
+    var newerRequestWasQueued = false
+    system.onPost = { _ in
+        Task { @MainActor in
+            try await Task.sleep(nanoseconds: 10_000_000)
+            system.simulateExternalSelection(sourceID: newerLayout.id)
+            selector.request(newerLayout)
+            newerRequestWasQueued = true
+        }
+    }
+
+    selector.request(inputMethod)
+    try await waitUntil { newerRequestWasQueued && selector.isIdle }
+
+    #expect(failures.isEmpty)
+    #expect(system.operations == [
+        "select:method-b",
+        "select:layout-a",
+        "native-previous",
+        "select:layout-a"
+    ])
+    #expect(system.currentSourceID == "layout-a")
+}
+
 @Test("internally posted native shortcut is marked throughout delivery")
 @MainActor
 func internallyPostedShortcutIsMarkedDuringDelivery() async throws {
@@ -640,6 +687,13 @@ private final class FakeInputSourceHandoffSystem: InputSourceHandoffSystem {
         let nextSourceID = previousSourceID
         previousSourceID = selectedSourceID
         selectedSourceID = nextSourceID
+        postSelectionNotification()
+    }
+
+    func simulateExternalSelection(sourceID: String) {
+        guard selectedSourceID != sourceID else { return }
+        previousSourceID = selectedSourceID
+        selectedSourceID = sourceID
         postSelectionNotification()
     }
 
