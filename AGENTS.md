@@ -2,8 +2,10 @@
 
 ## Precedence
 
-Follow issue requirements first, then the nearest nested `AGENTS.md`, this root
-contract, and finally the surrounding code.
+Follow the latest explicit `HUMAN → EXECUTOR` instruction, the current
+`ORCHESTRATOR → EXECUTOR` instruction, issue requirements and review feedback,
+the nearest nested `AGENTS.md`, this root contract, and finally the surrounding
+code, in that order.
 
 ## Scope and implementation
 
@@ -21,9 +23,12 @@ contract, and finally the surrounding code.
 
 ## Machine safety
 
-- Do not launch, install, or interact with applications. Do not use GUI
-  automation, simulated input, persistent services, or local platform-integration
-  runs already covered by CI.
+- By default, do not build application bundles, package, or install applications.
+  A current human or orchestrator instruction may explicitly authorize only the
+  named build, packaging, or installation action.
+- Do not launch an application or control its interface unless that action is
+  separately authorized. Do not use GUI automation, simulated input, persistent
+  services, or local platform-integration runs already covered by CI.
 - Report required human verification; do not perform it or create long manual
   checklists.
 
@@ -38,4 +43,5 @@ Keep routine messages concise. Put a completion or blocker handoff in one fenced
 block beginning with `EXECUTOR → ORCHESTRATOR` and include the repository, issue
 and pull-request numbers, branch, latest commit, CI state, unresolved feedback,
 uncovered requirements, blocking human verification, deferred visual verification,
-queue state, and any blocker.
+installation state, the installed commit when installation succeeds, queue state,
+and any blocker.
