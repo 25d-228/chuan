@@ -27,8 +27,11 @@ final class ShortcutRegistry {
             let sourceID = source.id
             KeyboardShortcuts.onKeyDown(for: source.shortcutName) {
                 precondition(Thread.isMainThread, "Input-source switching must run on main")
-                MainActor.assumeIsolated {
-                    _ = InputSourceSwitcher.shared.switchTo(sourceID: sourceID)
+                // Let the newly focused text-input context finish activating.
+                DispatchQueue.main.async {
+                    MainActor.assumeIsolated {
+                        _ = InputSourceSwitcher.shared.switchTo(sourceID: sourceID)
+                    }
                 }
             }
         }
