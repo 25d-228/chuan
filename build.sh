@@ -50,7 +50,7 @@ shopt -u nullglob
 if [[ "$CODESIGN_IDENTITY" == "-" ]]; then
     echo "==> Ad-hoc code signing…"
 else
-    echo "==> Code signing with $CODESIGN_IDENTITY…"
+    echo "==> Code signing with ${CODESIGN_IDENTITY}…"
 fi
 codesign --force --deep --sign "$CODESIGN_IDENTITY" "$APP_DIR"
 
