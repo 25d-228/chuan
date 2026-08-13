@@ -3,17 +3,21 @@ import CoreGraphics
 import Testing
 @testable import chuan
 
-private let ordinaryLayout = SwitchableInputSource(
+private let firstNonCJKVSource = SwitchableInputSource(
     id: "com.apple.keylayout.US",
-    isKeyboardLayout: true
+    isCJKV: false
 )
-private let asciiBridge = SwitchableInputSource(
+private let secondNonCJKVSource = SwitchableInputSource(
     id: "com.apple.keylayout.ABC",
-    isKeyboardLayout: true
+    isCJKV: false
 )
-private let complexInputMethod = SwitchableInputSource(
+private let otherCJKVSource = SwitchableInputSource(
+    id: "com.apple.inputmethod.Korean",
+    isCJKV: true
+)
+private let cjkvInputMethod = SwitchableInputSource(
     id: "com.apple.inputmethod.Japanese",
-    isKeyboardLayout: false
+    isCJKV: true
 )
 private let previousSourceShortcut = PreviousInputSourceShortcut(
     keyCode: 49,
@@ -28,16 +32,11 @@ private enum SwitchOperation: Equatable {
 
 @MainActor
 private final class FakeInputSourceSwitchingSystem: InputSourceSwitchingSystem {
-    var bridgeSources = [asciiBridge]
     var shortcut: PreviousInputSourceShortcut? = previousSourceShortcut
     var hasPostEventAccess = true
     var postEventAccessChecks = 0
     var operations: [SwitchOperation] = []
     var postedShortcuts: [PreviousInputSourceShortcut] = []
-
-    func asciiCapableKeyboardLayouts() -> [SwitchableInputSource] {
-        bridgeSources
-    }
 
     func previousInputSourceShortcut() throws -> PreviousInputSourceShortcut {
         guard let shortcut else {
@@ -64,34 +63,39 @@ private final class FakeInputSourceSwitchingSystem: InputSourceSwitchingSystem {
     }
 }
 
-@Test("An ordinary layout performs one direct selection")
+@Test("A non-CJKV source performs one direct selection")
 @MainActor
-func ordinaryLayoutPerformsOneDirectSelection() {
+func nonCJKVSourcePerformsOneDirectSelection() {
     let system = FakeInputSourceSwitchingSystem()
     let switcher = InputSourceSwitcher(system: system)
-    switcher.prepare([ordinaryLayout])
+    switcher.prepare([firstNonCJKVSource])
 
-    let error = switcher.switchTo(sourceID: ordinaryLayout.id)
+    let error = switcher.switchTo(sourceID: firstNonCJKVSource.id)
 
     #expect(error == nil)
-    #expect(system.operations == [.select(ordinaryLayout.id)])
+    #expect(system.operations == [.select(firstNonCJKVSource.id)])
     #expect(system.postEventAccessChecks == 0)
 }
 
-@Test("A complex source performs target, bridge, native key-down, and native key-up")
+@Test("A CJKV source uses the first non-CJKV source before the native shortcut")
 @MainActor
-func complexSourcePerformsTheKawaSequence() {
+func cjkvSourceUsesTheFirstNonCJKVSource() {
     let system = FakeInputSourceSwitchingSystem()
     let switcher = InputSourceSwitcher(system: system)
-    switcher.prepare([complexInputMethod])
+    switcher.prepare([
+        otherCJKVSource,
+        firstNonCJKVSource,
+        secondNonCJKVSource,
+        cjkvInputMethod
+    ])
     #expect(system.postEventAccessChecks == 0)
 
-    let error = switcher.switchTo(sourceID: complexInputMethod.id)
+    let error = switcher.switchTo(sourceID: cjkvInputMethod.id)
 
     #expect(error == nil)
     #expect(system.operations == [
-        .select(complexInputMethod.id),
-        .select(asciiBridge.id),
+        .select(cjkvInputMethod.id),
+        .select(firstNonCJKVSource.id),
         .nativeKeyDown,
         .nativeKeyUp
     ])
@@ -109,12 +113,12 @@ func missingSetupReportsOnceWithoutSelectingASource() {
         system: deniedSystem,
         reportSetupFailure: { deniedErrors.append($0) }
     )
-    deniedSwitcher.prepare([complexInputMethod])
+    deniedSwitcher.prepare([firstNonCJKVSource, cjkvInputMethod])
     #expect(deniedSystem.postEventAccessChecks == 0)
 
-    _ = deniedSwitcher.switchTo(sourceID: complexInputMethod.id)
+    _ = deniedSwitcher.switchTo(sourceID: cjkvInputMethod.id)
     #expect(deniedSystem.postEventAccessChecks == 1)
-    _ = deniedSwitcher.switchTo(sourceID: complexInputMethod.id)
+    _ = deniedSwitcher.switchTo(sourceID: cjkvInputMethod.id)
 
     #expect(deniedErrors == [.postEventPermissionDenied])
     #expect(deniedSystem.operations.isEmpty)
@@ -126,11 +130,11 @@ func missingSetupReportsOnceWithoutSelectingASource() {
         system: missingShortcutSystem,
         reportSetupFailure: { missingShortcutErrors.append($0) }
     )
-    missingShortcutSwitcher.prepare([complexInputMethod])
+    missingShortcutSwitcher.prepare([firstNonCJKVSource, cjkvInputMethod])
     #expect(missingShortcutSystem.postEventAccessChecks == 0)
 
-    _ = missingShortcutSwitcher.switchTo(sourceID: complexInputMethod.id)
-    _ = missingShortcutSwitcher.switchTo(sourceID: complexInputMethod.id)
+    _ = missingShortcutSwitcher.switchTo(sourceID: cjkvInputMethod.id)
+    _ = missingShortcutSwitcher.switchTo(sourceID: cjkvInputMethod.id)
 
     #expect(missingShortcutErrors == [.previousSourceShortcutUnavailable])
     #expect(missingShortcutSystem.operations.isEmpty)

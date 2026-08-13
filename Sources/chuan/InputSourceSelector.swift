@@ -5,30 +5,27 @@ import Foundation
 
 struct SwitchableInputSource: Equatable {
     let id: String
-    let isKeyboardLayout: Bool
+    let isCJKV: Bool
     fileprivate let tisInputSource: TISInputSource?
 
     init(_ inputSource: InputSource) {
         id = inputSource.id
-        isKeyboardLayout = inputSource.source.inputSourceType == kTISTypeKeyboardLayout as String
+        isCJKV = inputSource.source.sourceLanguages.first.map(Self.isCJKVLanguage) ?? false
         tisInputSource = inputSource.source
     }
 
-    init(id: String, isKeyboardLayout: Bool) {
+    init(id: String, isCJKV: Bool) {
         self.id = id
-        self.isKeyboardLayout = isKeyboardLayout
+        self.isCJKV = isCJKV
         tisInputSource = nil
     }
 
-    fileprivate init?(tisInputSource: TISInputSource) {
-        guard let id = tisInputSource.identifier else { return nil }
-        self.id = id
-        isKeyboardLayout = tisInputSource.inputSourceType == kTISTypeKeyboardLayout as String
-        self.tisInputSource = tisInputSource
+    private static func isCJKVLanguage(_ language: String) -> Bool {
+        language == "ko" || language == "ja" || language == "vi" || language.hasPrefix("zh")
     }
 
     static func == (lhs: SwitchableInputSource, rhs: SwitchableInputSource) -> Bool {
-        lhs.id == rhs.id && lhs.isKeyboardLayout == rhs.isKeyboardLayout
+        lhs.id == rhs.id && lhs.isCJKV == rhs.isCJKV
     }
 }
 
@@ -39,7 +36,7 @@ struct PreviousInputSourceShortcut: Equatable {
 
 enum InputSourceSwitchError: LocalizedError, Equatable {
     case sourceUnavailable(String)
-    case asciiBridgeUnavailable
+    case nonCJKVBridgeUnavailable
     case previousSourceShortcutUnavailable
     case postEventPermissionDenied
     case selectionFailed(phase: String, sourceID: String, status: OSStatus)
@@ -49,8 +46,8 @@ enum InputSourceSwitchError: LocalizedError, Equatable {
         switch self {
         case let .sourceUnavailable(sourceID):
             return "Input source \(sourceID) is unavailable. Refresh input sources and try again."
-        case .asciiBridgeUnavailable:
-            return "Enable an ASCII keyboard layout before switching to a complex input method."
+        case .nonCJKVBridgeUnavailable:
+            return "Enable a non-CJKV input source before switching to a CJKV input method."
         case .previousSourceShortcutUnavailable:
             return "Enable Select the previous input source in System Settings > Keyboard > Keyboard Shortcuts > Input Sources."
         case .postEventPermissionDenied:
@@ -65,7 +62,6 @@ enum InputSourceSwitchError: LocalizedError, Equatable {
 
 @MainActor
 protocol InputSourceSwitchingSystem: AnyObject {
-    func asciiCapableKeyboardLayouts() -> [SwitchableInputSource]
     func previousInputSourceShortcut() throws -> PreviousInputSourceShortcut
     func ensurePostEventAccess() -> Bool
     func select(_ inputSource: SwitchableInputSource) -> OSStatus
@@ -79,20 +75,6 @@ final class LiveInputSourceSwitchingSystem: InputSourceSwitchingSystem {
     private static let modifierParameterIndex = 2
 
     private var didRequestPostEventAccess = false
-
-    func asciiCapableKeyboardLayouts() -> [SwitchableInputSource] {
-        guard let list = TISCreateASCIICapableInputSourceList() else { return [] }
-        let sources = (list.takeRetainedValue() as NSArray) as? [TISInputSource] ?? []
-        return sources
-            .filter {
-                $0.inputSourceType == kTISTypeKeyboardLayout as String
-                    && $0.isEnabled
-                    && $0.isSelectable
-                    && $0.isASCIICapable
-            }
-            .compactMap(SwitchableInputSource.init)
-            .sorted { $0.id < $1.id }
-    }
 
     func previousInputSourceShortcut() throws -> PreviousInputSourceShortcut {
         let domain = UserDefaults.standard.persistentDomain(
@@ -157,15 +139,15 @@ final class LiveInputSourceSwitchingSystem: InputSourceSwitchingSystem {
 
 @MainActor
 final class InputSourceSwitcher {
-    private struct ComplexSwitch {
+    private struct CJKVSwitch {
         let target: SwitchableInputSource
         let bridge: SwitchableInputSource
         let shortcut: PreviousInputSourceShortcut
     }
 
     private enum PreparedSwitch {
-        case ordinary(SwitchableInputSource)
-        case complex(ComplexSwitch)
+        case direct(SwitchableInputSource)
+        case cjkv(CJKVSwitch)
         case unavailable(InputSourceSwitchError)
     }
 
@@ -186,20 +168,20 @@ final class InputSourceSwitcher {
 
     func prepare(_ inputSources: [SwitchableInputSource]) {
         preparedSwitches = [:]
-        let complexSources = inputSources.filter { !$0.isKeyboardLayout }
+        let cjkvSources = inputSources.filter(\.isCJKV)
 
-        for source in inputSources where source.isKeyboardLayout {
-            preparedSwitches[source.id] = .ordinary(source)
+        for source in inputSources where !source.isCJKV {
+            preparedSwitches[source.id] = .direct(source)
         }
-        guard !complexSources.isEmpty else { return }
+        guard !cjkvSources.isEmpty else { return }
 
         let setup: Result<(
             bridge: SwitchableInputSource,
             shortcut: PreviousInputSourceShortcut
         ), InputSourceSwitchError>
         do {
-            guard let bridge = system.asciiCapableKeyboardLayouts().first else {
-                throw InputSourceSwitchError.asciiBridgeUnavailable
+            guard let bridge = inputSources.first(where: { !$0.isCJKV }) else {
+                throw InputSourceSwitchError.nonCJKVBridgeUnavailable
             }
             let shortcut = try system.previousInputSourceShortcut()
             setup = .success((bridge, shortcut))
@@ -209,10 +191,10 @@ final class InputSourceSwitcher {
             setup = .failure(.previousSourceShortcutUnavailable)
         }
 
-        for target in complexSources {
+        for target in cjkvSources {
             switch setup {
             case let .success(setup):
-                preparedSwitches[target.id] = .complex(ComplexSwitch(
+                preparedSwitches[target.id] = .cjkv(CJKVSwitch(
                     target: target,
                     bridge: setup.bridge,
                     shortcut: setup.shortcut
@@ -232,9 +214,9 @@ final class InputSourceSwitcher {
         }
 
         switch preparedSwitch {
-        case let .ordinary(target):
+        case let .direct(target):
             return select(target, phase: "target")
-        case let .complex(inputMethodSwitch):
+        case let .cjkv(inputMethodSwitch):
             guard system.ensurePostEventAccess() else {
                 let error = InputSourceSwitchError.postEventPermissionDenied
                 reportSetupFailureOnce(error)
