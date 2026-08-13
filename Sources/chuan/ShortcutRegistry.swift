@@ -27,8 +27,11 @@ final class ShortcutRegistry {
             let sourceID = source.id
             KeyboardShortcuts.onKeyDown(for: source.shortcutName) {
                 precondition(Thread.isMainThread, "Input-source switching must run on main")
-                MainActor.assumeIsolated {
-                    _ = InputSourceSwitcher.shared.switchTo(sourceID: sourceID)
+                // Match Kawa by releasing the action from the Carbon callback.
+                DispatchQueue.main.async {
+                    MainActor.assumeIsolated {
+                        _ = InputSourceSwitcher.shared.switchTo(sourceID: sourceID)
+                    }
                 }
             }
         }

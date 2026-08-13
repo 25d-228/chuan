@@ -20,20 +20,12 @@ extension TISInputSource {
         propertyValue(kTISPropertyInputSourceCategory) as? String
     }
 
-    var inputSourceType: String? {
-        propertyValue(kTISPropertyInputSourceType) as? String
+    var sourceLanguages: [String] {
+        propertyValue(kTISPropertyInputSourceLanguages) as? [String] ?? []
     }
 
     var isSelectable: Bool {
         (propertyValue(kTISPropertyInputSourceIsSelectCapable) as? Bool) ?? false
-    }
-
-    var isEnabled: Bool {
-        (propertyValue(kTISPropertyInputSourceIsEnabled) as? Bool) ?? false
-    }
-
-    var isASCIICapable: Bool {
-        (propertyValue(kTISPropertyInputSourceIsASCIICapable) as? Bool) ?? false
     }
 
     var iconImageURL: URL? {

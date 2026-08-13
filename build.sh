@@ -1,8 +1,9 @@
 #!/bin/bash
 set -euo pipefail
 
-# Build a native Chuan.app from the Swift package, ad-hoc sign it, and
-# optionally install it to /Applications.
+# Build a native Chuan.app from the Swift package, sign it, and optionally
+# install it to /Applications. Signing defaults to ad-hoc unless
+# CHUAN_CODESIGN_IDENTITY names a keychain identity.
 #
 #   ./build.sh            build Chuan.app in this directory
 #   ./build.sh --install  also install to /Applications
@@ -13,6 +14,7 @@ cd "$ROOT"
 APP_NAME="Chuan"
 EXEC_NAME="chuan"
 APP_DIR="$ROOT/$APP_NAME.app"
+CODESIGN_IDENTITY="${CHUAN_CODESIGN_IDENTITY:--}"
 
 echo "==> Building (release)…"
 swift build -c release
@@ -45,8 +47,12 @@ for bundle in "$BIN_PATH"/*.bundle; do
 done
 shopt -u nullglob
 
-echo "==> Ad-hoc code signing…"
-codesign --force --deep --sign - "$APP_DIR"
+if [[ "$CODESIGN_IDENTITY" == "-" ]]; then
+    echo "==> Ad-hoc code signing…"
+else
+    echo "==> Code signing with ${CODESIGN_IDENTITY}…"
+fi
+codesign --force --deep --sign "$CODESIGN_IDENTITY" "$APP_DIR"
 
 echo "==> Architecture:"
 lipo -archs "$APP_DIR/Contents/MacOS/$EXEC_NAME"
