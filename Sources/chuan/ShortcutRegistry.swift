@@ -2,13 +2,13 @@ import AppKit
 import Foundation
 import KeyboardShortcuts
 
-/// Owns the global shortcut handlers for each input source.
+/// Owns the global shortcut handlers, one per input source.
 ///
-/// The shortcuts library *appends* handlers each time `onKeyDown(for:)` or
-/// `onKeyUp(for:)` is called for a name, so registering the same source twice
-/// would make each phase fire twice. We therefore register one handler per phase
-/// exactly once and remember which sources we've seen, so the list can be
-/// refreshed safely after the user adds a new input source.
+/// The shortcuts library *appends* a handler each time `onKeyUp(for:)` is called
+/// for a name, so registering the same source twice would make it fire twice. We
+/// therefore register each source's handler exactly once and remember which
+/// we've seen, so the list can be refreshed safely after the user adds a new
+/// input source.
 @MainActor
 final class ShortcutRegistry {
     static let shared = ShortcutRegistry()
@@ -25,20 +25,12 @@ final class ShortcutRegistry {
         for source in sources where !registered.contains(source.id) {
             registered.insert(source.id)
             let sourceID = source.id
-            let switchInputSource = {
+            KeyboardShortcuts.onKeyUp(for: source.shortcutName) {
                 precondition(Thread.isMainThread, "Input-source switching must run on main")
                 MainActor.assumeIsolated {
                     _ = InputSourceSwitcher.shared.switchTo(sourceID: sourceID)
                 }
             }
-            KeyboardShortcuts.onKeyDown(
-                for: source.shortcutName,
-                action: switchInputSource
-            )
-            KeyboardShortcuts.onKeyUp(
-                for: source.shortcutName,
-                action: switchInputSource
-            )
         }
     }
 }
